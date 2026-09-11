@@ -1,0 +1,10 @@
+{
+  "name": "delivery-comp",
+  "private": true,
+  "scripts": {
+    "postinstall": "cd server && npm install",
+    "start": "cd server && npm start",
+    "seed": "cd server && npm run seed"
+  },
+  "engines": { "node": ">=18" }
+}
