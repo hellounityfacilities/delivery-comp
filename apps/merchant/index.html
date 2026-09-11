@@ -37,6 +37,7 @@ let store, orders = [], tab = 'orders', socket;
 const beep = () => { try { const c = new (window.AudioContext || window.webkitAudioContext)(); const o = c.createOscillator(); o.frequency.value = 880; o.connect(c.destination); o.start(); setTimeout(() => o.stop(), 250); } catch {} };
 
 async function boot() {
+  ensureRole(['merchant']);
   if (!S.token) await renderLogin(root, { title: t('Merchant', 'التاجر'), subtitle: t('Manage your orders and menu.', 'أدر طلباتك وقائمتك.'), allowRoles: ['merchant'] });
   socket = connectSocket({ 'order:new': o => { beep(); toast(t('New order', 'طلب جديد') + ' ' + o.code); loadOrders(); }, 'order:update': () => loadOrders() });
   store = await api('/merchant/store'); render();

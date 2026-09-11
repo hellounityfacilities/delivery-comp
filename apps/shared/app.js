@@ -1,14 +1,20 @@
 // Shared helpers: API client, auth, i18n, socket, toast
 const API = location.origin + '/api';
-const S = { token: localStorage.getItem('token'), user: JSON.parse(localStorage.getItem('user') || 'null'), lang: localStorage.getItem('lang') || 'en' };
+// Each app keeps its own sign-in so customer/merchant/rider/console can be open in the same browser.
+const APP_KEY = (location.pathname.split('/')[1] || 'app') + ':';
+const S = { token: localStorage.getItem(APP_KEY + 'token'), user: JSON.parse(localStorage.getItem(APP_KEY + 'user') || 'null'), lang: localStorage.getItem('lang') || 'en' };
 async function api(path, opts = {}) {
   const res = await fetch(API + path, { ...opts, headers: { 'content-type': 'application/json', ...(S.token ? { authorization: 'Bearer ' + S.token } : {}), ...(opts.headers || {}) }, body: opts.body ? JSON.stringify(opts.body) : undefined });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) { if (res.status === 401 && S.token) { logout(); } throw new Error(data.error || 'Request failed'); }
   return data;
 }
-function setSession(token, user) { S.token = token; S.user = user; localStorage.setItem('token', token); localStorage.setItem('user', JSON.stringify(user)); }
-function logout() { localStorage.removeItem('token'); localStorage.removeItem('user'); location.reload(); }
+function setSession(token, user) { S.token = token; S.user = user; localStorage.setItem(APP_KEY + 'token', token); localStorage.setItem(APP_KEY + 'user', JSON.stringify(user)); }
+function clearSession() { S.token = null; S.user = null; localStorage.removeItem(APP_KEY + 'token'); localStorage.removeItem(APP_KEY + 'user'); }
+function logout() { clearSession(); location.reload(); }
+// Drop a saved sign-in that does not have the role this app needs, so the login screen shows instead of a blank page.
+function ensureRole(roles) { if (S.user && roles && !roles.includes(S.user.role) && S.user.role !== 'admin') clearSession(); }
+window.addEventListener('unhandledrejection', e => { const m = e.reason && e.reason.message; if (m) toast(m, true); });
 function toast(msg, err) { const t = document.createElement('div'); t.className = 'toast' + (err ? ' err' : ''); t.textContent = msg; document.body.appendChild(t); setTimeout(() => t.remove(), 3200); }
 const fmt = n => 'QAR ' + Number(n || 0).toFixed(2);
 const ago = d => { const m = Math.round((Date.now() - new Date(d)) / 60000); return m < 1 ? 'now' : m < 60 ? m + 'm' : Math.round(m / 60) + 'h'; };

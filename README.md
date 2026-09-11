@@ -21,7 +21,7 @@ One Node.js backend serves the API, real-time events, and all four web apps from
 cd server
 cp .env.example .env          # set DATABASE_URL to a Postgres database
 npm install
-npm run seed                  # creates tables and a Doha demo dataset
+npm run seed                  # RESETS the database and loads a full Doha demo dataset
 npm start                     # http://localhost:3000
 ```
 

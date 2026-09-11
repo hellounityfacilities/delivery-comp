@@ -39,6 +39,7 @@ const ROLE = () => S.user.role;
 const PAGES = [['live', 'Live operations'], ['orders', 'Orders'], ['fleet', 'Fleet'], ['stores', 'Stores'], ['zones', 'Zones'], ['promos', 'Promotions'], ['finance', 'Finance'], ['users', 'Users']];
 
 async function boot() {
+  ensureRole(['dispatcher', 'fleet', 'finance', 'admin']);
   if (!S.token) await renderLogin(root, { title: 'Operations console', subtitle: 'Dispatch, fleet, merchants and finance.', allowRoles: ['dispatcher', 'fleet', 'finance', 'admin'] });
   socket = connectSocket({
     'order:new': o => { push(`New order ${o.code} (${o.vertical})`); if (page === 'live') refreshLive(); if (page === 'orders') loadOrders(); },
