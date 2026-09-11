@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Rider</title>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&family=IBM+Plex+Sans+Arabic:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="../shared/app.css">
+<style>
+  .app{max-width:520px;margin:0 auto;padding:16px 16px 40px}
+  .head{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-inline-end:6px;background:var(--mist)}
+  .dot.available{background:var(--ok)}.dot.on_task{background:var(--maroon)}.dot.break{background:var(--warn)}
+  .big{font-size:22px;font-weight:800;padding:18px}
+  .task{border:2px solid var(--maroon)}
+  .task .leg{display:flex;gap:10px;padding:10px 0;border-top:1px solid var(--line)}
+  .task .leg b{display:block}
+  #map{height:220px;border-radius:12px;margin:10px 0;border:1px solid var(--line)}
+  .kpi{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin:14px 0}
+  .kpi .card{text-align:center;padding:12px 6px}.kpi b{font-size:20px;display:block}
+  .ack{background:var(--maroon);color:#fff;border-radius:14px;padding:18px;text-align:center}
+  .ack .btn{background:#fff;color:var(--maroon);border-color:#fff;margin-top:10px}
+  .timer{font-size:34px;font-weight:800}
+</style>
+</head>
+<body><div id="root" class="app"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="/socket.io/socket.io.js"></script>
+<script src="../shared/app.js"></script>
+<script>
+const root = document.getElementById('root');
+let me, tasks = [], socket, geoWatch, ackTimer, ackLeft = 60, map;
+
+async function boot() {
+  if (!S.token) await renderLogin(root, { title: t('Rider', 'المندوب'), subtitle: t('Clock in to receive deliveries.', 'سجّل حضورك لاستلام التوصيلات.'), allowRoles: ['rider'] });
+  socket = connectSocket({ 'rider:task': o => { vibrate(); toast(t('New task', 'مهمة جديدة') + ' ' + o.code); refresh(); }, 'order:update': () => refresh() });
+  refresh();
+}
+const vibrate = () => navigator.vibrate && navigator.vibrate([200, 100, 200]);
+async function refresh() { me = await api('/rider/me'); tasks = await api('/orders/rider'); render(); }
+
+function startGeo() {
+  if (geoWatch || !navigator.geolocation) return;
+  geoWatch = navigator.geolocation.watchPosition(p => api('/rider/location', { method: 'POST', body: { lat: p.coords.latitude, lng: p.coords.longitude } }).catch(() => {}), () => {}, { enableHighAccuracy: true, maximumAge: 5000 });
+}
+function stopGeo() { if (geoWatch) navigator.geolocation.clearWatch(geoWatch); geoWatch = null; }
+
+function render() {
+  const onShift = !!me.shift;
+  if (onShift) startGeo(); else stopGeo();
+  const task = tasks[0];
+  root.innerHTML = `<div class="head"><div><b>${S.user.name || t('Rider', 'مندوب')}</b><div class="muted"><span class="dot ${me.status}"></span>${{ offline: t('Off shift', 'خارج الدوام'), available: t('Available', 'متاح'), on_task: t('On task', 'في مهمة'), break: t('On break', 'استراحة') }[me.status]}</div></div>
+      <div class="row"><button class="pill" onclick="setLang(S.lang==='ar'?'en':'ar');render()">${S.lang === 'ar' ? 'EN' : 'ع'}</button><button class="pill" onclick="logout()">${t('Sign out', 'خروج')}</button></div></div>
+    ${!onShift ? `<button class="btn block big" onclick="clockIn()">${t('Clock in', 'تسجيل الحضور')}</button><p class="muted" style="text-align:center;margin-top:10px">${t('Your location is shared only while on shift.', 'تتم مشاركة موقعك أثناء الدوام فقط.')}</p>`
+    : task ? renderTask(task) : `<div class="card" style="text-align:center;padding:30px"><div style="font-size:40px">🛵</div><b>${t('Waiting for the next order', 'بانتظار الطلب التالي')}</b><p class="muted">${t('Stay near your zone. Tasks are assigned automatically.', 'ابق قرب منطقتك. تُسند المهام تلقائياً.')}</p>
+        <div class="row" style="justify-content:center;margin-top:10px">${me.status === 'break' ? `<button class="btn sm" onclick="setStatus('available')">${t('Back from break', 'العودة من الاستراحة')}</button>` : `<button class="btn sm ghost" onclick="setStatus('break')">${t('Take a break', 'استراحة')}</button>`}<button class="btn sm ghost" onclick="clockOut()">${t('Clock out', 'إنهاء الدوام')}</button></div></div>`}
+    <div class="kpi"><div class="card"><span class="muted">${t('Today', 'اليوم')}</span><b>${me.today.deliveries}</b></div><div class="card"><span class="muted">${t('Cash in hand', 'النقد بحوزتك')}</span><b>${Number(me.cash_in_hand).toFixed(0)}</b></div><div class="card"><span class="muted">${t('Cash limit', 'الحد')}</span><b>${Number(me.cash_limit).toFixed(0)}</b></div></div>
+    ${Number(me.cash_in_hand) >= Number(me.cash_limit) * 0.8 ? `<div class="card" style="background:var(--warn-soft);border-color:transparent">${t('You are near your cash limit. Settle with the office to keep receiving cash orders.', 'اقتربت من حد النقد. سلّم النقد للمكتب لتستمر باستلام الطلبات النقدية.')}</div>` : ''}
+    <div id="map" style="display:${task ? 'block' : 'none'}"></div>`;
+  if (task) drawMap(task);
+}
+function renderTask(o) {
+  const needsAck = !o.acknowledged_at;
+  const toStore = ['accepted', 'preparing', 'ready'].includes(o.status);
+  const from = o.type === 'parcel' ? o.pickup : { lat: o.store_lat, lng: o.store_lng, line: o.store_address };
+  const fromName = o.type === 'parcel' ? t('Pickup', 'الاستلام') : o.store_name;
+  const nav = (p) => `https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lng}&travelmode=driving`;
+  if (needsAck && !ackTimer) { ackLeft = 60; ackTimer = setInterval(() => { ackLeft--; const e = document.getElementById('tm'); if (e) e.textContent = ackLeft; if (ackLeft <= 0) { clearInterval(ackTimer); ackTimer = null; refresh(); } }, 1000); }
+  if (!needsAck && ackTimer) { clearInterval(ackTimer); ackTimer = null; }
+  return `${needsAck ? `<div class="ack"><div class="timer" id="tm">${ackLeft}</div>${t('New task assigned. Confirm you are taking it.', 'تم إسناد مهمة جديدة. أكد استلامك لها.')}<br><button class="btn block" onclick="ack(${o.id})">${t('Accept task', 'قبول المهمة')}</button></div>` : ''}
+    <div class="card task" style="margin-top:10px"><div class="row between"><b>${o.code}</b><span class="pill ${pillClass(o.status)}">${statusLabel(o.status)}</span></div>
+      <div class="muted">${o.vertical} · ${o.payment_method === 'cod' ? `💵 ${t('Collect', 'حصّل')} ${fmt(o.total)}` : `💳 ${t('Prepaid', 'مدفوع مسبقاً')}`}${Number(o.cod_collect) > 0 ? ` · ${t('plus collect', 'وحصّل')} ${fmt(o.cod_collect)}` : ''}</div>
+      <div class="leg"><span>🏪</span><div style="flex:1"><b>${fromName}</b><span class="muted">${from.line || ''}</span></div><a class="btn sm ghost" href="${nav(from)}" target="_blank">${t('Navigate', 'توجيه')}</a></div>
+      <div class="leg"><span>🏠</span><div style="flex:1"><b>${o.customer_name || t('Customer', 'العميل')}</b><span class="muted">${o.dropoff.line || ''}${o.dropoff.notes ? ' · ' + o.dropoff.notes : ''}</span></div><div class="row"><a class="btn sm ghost" href="tel:${o.dropoff.phone || o.customer_phone}">📞</a><a class="btn sm ghost" href="${nav(o.dropoff)}" target="_blank">${t('Navigate', 'توجيه')}</a></div></div>
+      ${o.items.length ? `<div class="muted" style="margin-top:6px">${o.items.map(i => i.qty + '× ' + i.name).join(', ')}</div>` : ''}${o.notes ? `<div class="muted">📝 ${o.notes}</div>` : ''}
+      <div style="margin-top:12px">${needsAck ? '' : toStore ? (o.status === 'ready' ? `<button class="btn block" onclick="move(${o.id},'picked_up')">${t('Picked up', 'تم الاستلام')}</button>` : `<p class="muted" style="text-align:center">${t('Order is being prepared. Head to the store.', 'الطلب قيد التحضير. توجه إلى المتجر.')}</p>`)
+        : `<button class="btn ok block" onclick="deliver(${o.id})">${t('Delivered', 'تم التوصيل')}</button>`}</div></div>`;
+}
+function drawMap(o) {
+  const from = o.type === 'parcel' ? o.pickup : { lat: o.store_lat, lng: o.store_lng };
+  map = L.map('map'); L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+  const a = L.marker([from.lat, from.lng]).addTo(map).bindTooltip('🏪'), b = L.marker([o.dropoff.lat, o.dropoff.lng]).addTo(map).bindTooltip('🏠');
+  if (me.lat) L.circleMarker([me.lat, me.lng], { radius: 8, color: '#8A1538', fillColor: '#8A1538', fillOpacity: .9 }).addTo(map);
+  map.fitBounds([[from.lat, from.lng], [o.dropoff.lat, o.dropoff.lng]], { padding: [30, 30] });
+}
+async function clockIn() { const go = pos => api('/rider/clock-in', { method: 'POST', body: pos }).then(refresh).catch(e => toast(e.message, true)); if (navigator.geolocation) navigator.geolocation.getCurrentPosition(p => go({ lat: p.coords.latitude, lng: p.coords.longitude }), () => go({})); else go({}); }
+async function clockOut() { try { const r = await api('/rider/clock-out', { method: 'POST' }); toast(`${t('Shift ended. Cash to settle:', 'انتهى الدوام. النقد للتسليم:')} ${fmt(r.cash_in_hand)}`); } catch (e) { toast(e.message, true); } refresh(); }
+async function setStatus(s) { try { await api('/rider/status', { method: 'POST', body: { status: s } }); } catch (e) { toast(e.message, true); } refresh(); }
+async function ack(id) { try { await api(`/orders/${id}/ack`, { method: 'POST' }); } catch (e) { toast(e.message, true); } refresh(); }
+async function move(id, s) { try { await api(`/orders/${id}/status`, { method: 'POST', body: { status: s } }); } catch (e) { toast(e.message, true); } refresh(); }
+async function deliver(id) {
+  const m = document.createElement('div'); m.className = 'modal-bg'; m.innerHTML = `<div class="modal"><h2 class="h2">${t('Confirm delivery', 'تأكيد التوصيل')}</h2><p class="muted">${t('Take a photo of the handover as proof.', 'التقط صورة للتسليم كإثبات.')}</p><input type="file" accept="image/*" capture="environment" id="ph"><div class="row" style="margin-top:14px"><button class="btn ok" id="ok">${t('Mark delivered', 'تم التوصيل')}</button><button class="btn ghost" id="x">${t('Cancel', 'إلغاء')}</button></div></div>`;
+  document.body.appendChild(m); m.querySelector('#x').onclick = () => m.remove();
+  m.querySelector('#ok').onclick = async () => { let proof; const f = m.querySelector('#ph').files[0]; if (f) proof = await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result.slice(0, 200000)); fr.readAsDataURL(f); }); try { await api(`/orders/${id}/status`, { method: 'POST', body: { status: 'delivered', proof_url: proof } }); m.remove(); toast(t('Delivered. Nice work.', 'تم التوصيل. أحسنت.')); } catch (e) { toast(e.message, true); } refresh(); };
+}
+boot();
+</script>
+</body></html>

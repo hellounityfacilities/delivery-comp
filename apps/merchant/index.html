@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Merchant</title>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&family=IBM+Plex+Sans+Arabic:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../shared/app.css">
+<style>
+  .app{max-width:900px;margin:0 auto;padding:0 16px 40px}
+  .top{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:16px 0;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--paper);z-index:5}
+  .tabs{display:flex;gap:6px;margin:14px 0}
+  .tabs button{padding:8px 14px;border-radius:999px;font-weight:700;background:#fff;border:1px solid var(--line)}
+  .tabs button.on{background:var(--maroon);color:#fff;border-color:var(--maroon)}
+  .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+  .col h3{margin:0 0 8px;font-size:14px;color:var(--slate)}
+  .ord{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:10px}
+  .ord.new{border-color:var(--maroon);box-shadow:0 0 0 3px var(--maroon-soft)}
+  .ord ul{margin:8px 0;padding-left:18px}
+  .ord .acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+  .status{display:flex;gap:6px}
+  .status button{padding:8px 12px;border-radius:8px;border:1px solid var(--line);background:#fff;font-weight:700;font-size:13px}
+  .status button.on.open{background:var(--ok-soft);color:var(--ok);border-color:var(--ok)}
+  .status button.on.busy{background:var(--warn-soft);color:var(--warn);border-color:var(--warn)}
+  .status button.on.closed{background:var(--maroon-soft);color:var(--maroon);border-color:var(--maroon)}
+  .prod{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--line)}
+  .prod.off{opacity:.5}
+  .kpi{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+  .kpi .card b{font-size:22px;display:block}
+</style>
+</head>
+<body><div id="root" class="app"></div>
+<script src="/socket.io/socket.io.js"></script>
+<script src="../shared/app.js"></script>
+<script>
+const root = document.getElementById('root');
+let store, orders = [], tab = 'orders', socket;
+const beep = () => { try { const c = new (window.AudioContext || window.webkitAudioContext)(); const o = c.createOscillator(); o.frequency.value = 880; o.connect(c.destination); o.start(); setTimeout(() => o.stop(), 250); } catch {} };
+
+async function boot() {
+  if (!S.token) await renderLogin(root, { title: t('Merchant', 'التاجر'), subtitle: t('Manage your orders and menu.', 'أدر طلباتك وقائمتك.'), allowRoles: ['merchant'] });
+  socket = connectSocket({ 'order:new': o => { beep(); toast(t('New order', 'طلب جديد') + ' ' + o.code); loadOrders(); }, 'order:update': () => loadOrders() });
+  store = await api('/merchant/store'); render();
+}
+function render() {
+  root.innerHTML = `<div class="top"><div><b>${S.lang === 'ar' && store.name_ar ? store.name_ar : store.name_en}</b><div class="muted">${store.vertical} · ${t('prep', 'تحضير')} ${store.prep_time_min} ${t('min', 'د')}</div></div>
+    <div class="status">${['open', 'busy', 'closed'].map(s => `<button class="${s} ${store.status === s ? 'on' : ''}" onclick="setStatus('${s}')">${t({ open: 'Open', busy: 'Busy', closed: 'Closed' }[s], { open: 'مفتوح', busy: 'مشغول', closed: 'مغلق' }[s])}</button>`).join('')}</div></div>
+    <div class="tabs"><button class="${tab === 'orders' ? 'on' : ''}" onclick="tab='orders';render()">${t('Orders', 'الطلبات')}</button><button class="${tab === 'catalog' ? 'on' : ''}" onclick="tab='catalog';render()">${t('Catalog', 'القائمة')}</button><button class="${tab === 'reports' ? 'on' : ''}" onclick="tab='reports';render()">${t('Reports', 'التقارير')}</button><button class="${tab === 'settings' ? 'on' : ''}" onclick="tab='settings';render()">${t('Settings', 'الإعدادات')}</button></div>
+    <div id="body"><div class="spin"></div></div>`;
+  ({ orders: loadOrders, catalog: renderCatalog, reports: renderReports, settings: renderSettings })[tab]();
+}
+async function setStatus(s) { await api('/merchant/store', { method: 'PATCH', body: { status: s } }); store = await api('/merchant/store'); render(); }
+
+// ---- Orders ----
+async function loadOrders() {
+  orders = await api('/orders/store'); if (tab !== 'orders') return;
+  const groups = { placed: t('New', 'جديد'), awaiting_approval: t('Needs approval', 'بحاجة لموافقة'), accepted: t('Accepted', 'مقبول'), preparing: t('Preparing', 'قيد التحضير'), ready: t('Ready for pickup', 'جاهز للاستلام') };
+  const by = {}; orders.forEach(o => (by[o.status] = by[o.status] || []).push(o));
+  document.getElementById('body').innerHTML = `<div class="cols">${Object.entries(groups).filter(([k]) => by[k]).map(([k, label]) => `<div class="col"><h3>${label} (${by[k].length})</h3>${by[k].map(orderCard).join('')}</div>`).join('') || `<div class="empty">${t('No active orders. New orders appear here with a sound.', 'لا توجد طلبات نشطة. ستظهر الطلبات الجديدة هنا مع تنبيه صوتي.')}</div>`}</div>
+    <p style="margin-top:20px"><button class="btn ghost sm" onclick="orderHistory()">${t('Order history', 'سجل الطلبات')}</button></p>`;
+}
+function orderCard(o) {
+  const a = { placed: `<button class="btn sm" onclick="accept(${o.id})">${t('Accept', 'قبول')}</button><button class="btn sm ghost" onclick="reject(${o.id})">${t('Reject', 'رفض')}</button>`,
+    awaiting_approval: `<button class="btn sm ghost" onclick="viewRx('${o.prescription_url || ''}')">${t('View prescription', 'عرض الوصفة')}</button><button class="btn sm" onclick="accept(${o.id})">${t('Approve', 'موافقة')}</button><button class="btn sm ghost" onclick="reject(${o.id})">${t('Decline', 'رفض')}</button>`,
+    accepted: `<button class="btn sm" onclick="move(${o.id},'preparing')">${t('Start preparing', 'بدء التحضير')}</button><button class="btn sm ok" onclick="move(${o.id},'ready')">${t('Ready', 'جاهز')}</button>`,
+    preparing: `<button class="btn sm ok" onclick="move(${o.id},'ready')">${t('Ready for pickup', 'جاهز للاستلام')}</button>`,
+    ready: `<span class="muted">${o.rider_name ? '🛵 ' + o.rider_name : t('Waiting for rider', 'بانتظار المندوب')}</span>` }[o.status] || '';
+  return `<div class="ord ${o.status === 'placed' ? 'new' : ''}"><div class="row between"><b>${o.code}</b><span class="muted">${ago(o.created_at)} · ${o.payment_method.toUpperCase()}</span></div>
+    <ul>${o.items.map(i => `<li>${i.qty} × ${i.name}${i.notes ? ' <i>(' + i.notes + ')</i>' : ''}</li>`).join('')}</ul>
+    ${o.notes ? `<div class="muted">📝 ${o.notes}</div>` : ''}<div class="row between"><span class="muted">${o.customer_name || t('Customer', 'عميل')}</span><b>${fmt(o.subtotal)}</b></div><div class="acts">${a}</div></div>`;
+}
+async function accept(id) { const p = prompt(t('Preparation time in minutes', 'وقت التحضير بالدقائق'), store.prep_time_min); if (p === null) return; try { await api(`/orders/${id}/status`, { method: 'POST', body: { status: 'accepted', prep_time_min: Number(p) } }); } catch (e) { toast(e.message, true); } loadOrders(); }
+async function reject(id) { const n = prompt(t('Reason for rejecting', 'سبب الرفض')); if (n === null) return; try { await api(`/orders/${id}/status`, { method: 'POST', body: { status: 'cancelled', note: n } }); } catch (e) { toast(e.message, true); } loadOrders(); }
+async function move(id, s) { try { await api(`/orders/${id}/status`, { method: 'POST', body: { status: s } }); } catch (e) { toast(e.message, true); } loadOrders(); }
+function viewRx(url) { if (!url) return toast(t('No prescription attached', 'لا توجد وصفة مرفقة'), true); const w = window.open(); w.document.write(`<img src="${url}" style="max-width:100%">`); }
+async function orderHistory() { const os = await api('/orders/store?all=1'); document.getElementById('body').innerHTML = `<button class="btn ghost sm" onclick="loadOrders()">‹ ${t('Back', 'رجوع')}</button><table class="t" style="margin-top:10px"><tr><th>${t('Order', 'الطلب')}</th><th>${t('Status', 'الحالة')}</th><th>${t('Items', 'العناصر')}</th><th>${t('Sales', 'المبيعات')}</th><th>${t('When', 'الوقت')}</th></tr>${os.map(o => `<tr><td>${o.code}</td><td><span class="pill ${pillClass(o.status)}">${statusLabel(o.status)}</span></td><td>${o.items.map(i => i.qty + '× ' + i.name).join(', ')}</td><td>${fmt(o.subtotal)}</td><td>${new Date(o.created_at).toLocaleString()}</td></tr>`).join('')}</table>`; }
+
+// ---- Catalog ----
+async function renderCatalog() {
+  store = await api('/merchant/store');
+  const byCat = {}; store.products.forEach(p => (byCat[p.category_id] = byCat[p.category_id] || []).push(p));
+  document.getElementById('body').innerHTML = `<div class="row between" style="margin-bottom:10px"><button class="btn sm" onclick="editProduct()">+ ${t('Add product', 'إضافة منتج')}</button><button class="btn sm ghost" onclick="addCategory()">+ ${t('Category', 'فئة')}</button></div>
+    ${store.categories.map(c => `<div class="card" style="margin-bottom:10px"><h2 class="h2">${c.name_en}${c.name_ar ? ' · ' + c.name_ar : ''}</h2>${(byCat[c.id] || []).map(prodRow).join('') || '<p class="muted">' + t('No products', 'لا توجد منتجات') + '</p>'}</div>`).join('')}
+    ${(byCat[null] || []).length ? `<div class="card"><h2 class="h2">${t('Uncategorised', 'بدون فئة')}</h2>${byCat[null].map(prodRow).join('')}</div>` : ''}`;
+}
+const prodRow = p => `<div class="prod ${p.active ? '' : 'off'}"><div><b>${p.name_en}</b> <span class="muted">${p.name_ar || ''}</span>${p.requires_approval ? ' <span class="pill warn">Rx</span>' : ''}<div class="muted">${fmt(p.price)} / ${p.unit}${p.stock !== null ? ' · ' + t('stock', 'المخزون') + ' ' + p.stock : ''}</div></div>
+  <div class="row"><button class="btn sm ghost" onclick="toggleProd(${p.id},${!p.active})">${p.active ? t('Hide', 'إخفاء') : t('Show', 'إظهار')}</button><button class="btn sm ghost" onclick="editProduct(${p.id})">${t('Edit', 'تعديل')}</button></div></div>`;
+async function toggleProd(id, active) { await api(`/merchant/products/${id}`, { method: 'PATCH', body: { active } }); renderCatalog(); }
+async function addCategory() { const en = prompt('Category name (English)'); if (!en) return; const ar = prompt('Category name (Arabic)') || null; await api('/merchant/categories', { method: 'POST', body: { name_en: en, name_ar: ar } }); renderCatalog(); }
+function editProduct(id) {
+  const p = id ? store.products.find(x => x.id === id) : { unit: 'each', stock: null, category_id: store.categories[0] && store.categories[0].id, attributes: {} };
+  const m = document.createElement('div'); m.className = 'modal-bg'; m.innerHTML = `<div class="modal"><h2 class="h2">${id ? t('Edit product', 'تعديل منتج') : t('New product', 'منتج جديد')}</h2>
+    <div class="field"><label>Name (English)</label><input id="en" value="${p.name_en || ''}"></div><div class="field"><label>الاسم (عربي)</label><input id="ar" value="${p.name_ar || ''}"></div>
+    <div class="field"><label>${t('Description', 'الوصف')}</label><input id="de" value="${p.description || ''}"></div>
+    <div class="row"><div class="field" style="flex:1"><label>${t('Price (QAR)', 'السعر')}</label><input id="pr" type="number" step="0.25" value="${p.price || ''}"></div><div class="field" style="flex:1"><label>${t('Unit', 'الوحدة')}</label><select id="un">${['each', 'kg', 'g', 'ltr'].map(u => `<option ${p.unit === u ? 'selected' : ''}>${u}</option>`).join('')}</select></div></div>
+    <div class="row"><div class="field" style="flex:1"><label>${t('Category', 'الفئة')}</label><select id="ca">${store.categories.map(c => `<option value="${c.id}" ${p.category_id === c.id ? 'selected' : ''}>${c.name_en}</option>`).join('')}</select></div><div class="field" style="flex:1"><label>${t('Stock (blank = untracked)', 'المخزون')}</label><input id="st" type="number" value="${p.stock ?? ''}"></div></div>
+    <label class="row" style="margin-bottom:12px"><input type="checkbox" id="rx" ${p.requires_approval ? 'checked' : ''}> ${t('Requires prescription / approval', 'يتطلب وصفة طبية')}</label>
+    <div class="row"><button class="btn" id="save">${t('Save', 'حفظ')}</button><button class="btn ghost" id="close">${t('Cancel', 'إلغاء')}</button></div></div>`;
+  document.body.appendChild(m); m.querySelector('#close').onclick = () => m.remove();
+  m.querySelector('#save').onclick = async () => {
+    const stv = m.querySelector('#st').value;
+    const body = { name_en: m.querySelector('#en').value, name_ar: m.querySelector('#ar').value, description: m.querySelector('#de').value, price: Number(m.querySelector('#pr').value), unit: m.querySelector('#un').value, category_id: Number(m.querySelector('#ca').value), stock: stv === '' ? (id ? 'untracked' : null) : Number(stv), requires_approval: m.querySelector('#rx').checked };
+    try { await api(id ? `/merchant/products/${id}` : '/merchant/products', { method: id ? 'PATCH' : 'POST', body }); m.remove(); renderCatalog(); } catch (e) { toast(e.message, true); }
+  };
+}
+
+// ---- Reports / settings ----
+async function renderReports() {
+  const from = new Date(); from.setDate(1);
+  const r = await api(`/merchant/report?from=${from.toISOString()}`);
+  document.getElementById('body').innerHTML = `<p class="muted">${t('This month', 'هذا الشهر')}</p><div class="kpi"><div class="card"><span class="muted">${t('Delivered orders', 'طلبات موصلة')}</span><b>${r.orders}</b></div><div class="card"><span class="muted">${t('Sales', 'المبيعات')}</span><b>${fmt(r.sales)}</b></div><div class="card"><span class="muted">${t('Commission', 'العمولة')}</span><b>${fmt(r.commission)}</b></div><div class="card"><span class="muted">${t('Net payable to you', 'صافي المستحق لك')}</span><b>${fmt(r.payable)}</b></div></div>`;
+}
+function renderSettings() {
+  document.getElementById('body').innerHTML = `<div class="card" style="max-width:480px"><div class="field"><label>Store name (English)</label><input id="en" value="${store.name_en}"></div><div class="field"><label>اسم المتجر (عربي)</label><input id="ar" value="${store.name_ar || ''}"></div><div class="field"><label>${t('Address', 'العنوان')}</label><input id="ad" value="${store.address || ''}"></div><div class="field"><label>${t('Default preparation time (minutes)', 'وقت التحضير الافتراضي')}</label><input id="pt" type="number" value="${store.prep_time_min}"></div>
+    <div class="row"><button class="btn" onclick="saveSettings()">${t('Save', 'حفظ')}</button><button class="btn ghost" onclick="setLang(S.lang==='ar'?'en':'ar');render()">${S.lang === 'ar' ? 'English' : 'العربية'}</button><button class="btn ghost" onclick="logout()">${t('Sign out', 'خروج')}</button></div></div>`;
+}
+async function saveSettings() { store = { ...store, ...(await api('/merchant/store', { method: 'PATCH', body: { name_en: en.value, name_ar: ar.value, address: ad.value, prep_time_min: Number(pt.value) } })) }; toast(t('Saved', 'تم الحفظ')); render(); }
+boot();
+</script>
+</body></html>

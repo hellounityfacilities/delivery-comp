@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Operations console</title>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="../shared/app.css">
+<style>
+  .shell{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
+  aside{background:#fff;border-right:1px solid var(--line);padding:18px 14px;position:sticky;top:0;height:100vh}
+  aside .brand{font-weight:800;font-size:15px;margin-bottom:4px}
+  aside nav button{display:block;width:100%;text-align:start;padding:9px 12px;border-radius:8px;font-weight:600;color:var(--slate);margin-bottom:2px}
+  aside nav button.on{background:var(--maroon-soft);color:var(--maroon)}
+  main{padding:22px 26px}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px}
+  .kpis .card b{font-size:26px;display:block;letter-spacing:-.02em}
+  .kpis .card.alert b{color:var(--maroon)}
+  #map{height:420px;border-radius:12px;border:1px solid var(--line)}
+  .live{display:grid;grid-template-columns:1fr 340px;gap:14px}
+  .feed{max-height:420px;overflow:auto}
+  .feed .it{padding:8px 0;border-bottom:1px solid var(--line);font-size:13px}
+  .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+  .toolbar input,.toolbar select{padding:8px 10px;border:1px solid var(--line);border-radius:8px}
+  .drawer{position:fixed;top:0;right:0;bottom:0;width:440px;max-width:100vw;background:#fff;border-left:1px solid var(--line);padding:20px;overflow:auto;z-index:20;box-shadow:-8px 0 30px rgba(0,0,0,.08)}
+  .tl{list-style:none;padding:0;margin:10px 0}.tl li{font-size:13px;padding:4px 0;border-bottom:1px dashed var(--line)}
+  .alert-row{background:var(--warn-soft)}
+  @media(max-width:900px){.shell{grid-template-columns:1fr}aside{position:static;height:auto}.live{grid-template-columns:1fr}}
+</style>
+</head>
+<body><div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="/socket.io/socket.io.js"></script>
+<script src="../shared/app.js"></script>
+<script>
+const root = document.getElementById('root');
+let page = 'live', socket, map, riderLayer, orderLayer, feed = [], riders = {}, zonesCache = [];
+const ROLE = () => S.user.role;
+const PAGES = [['live', 'Live operations'], ['orders', 'Orders'], ['fleet', 'Fleet'], ['stores', 'Stores'], ['zones', 'Zones'], ['promos', 'Promotions'], ['finance', 'Finance'], ['users', 'Users']];
+
+async function boot() {
+  if (!S.token) await renderLogin(root, { title: 'Operations console', subtitle: 'Dispatch, fleet, merchants and finance.', allowRoles: ['dispatcher', 'fleet', 'finance', 'admin'] });
+  socket = connectSocket({
+    'order:new': o => { push(`New order ${o.code} (${o.vertical})`); if (page === 'live') refreshLive(); if (page === 'orders') loadOrders(); },
+    'order:update': o => { push(`${o.code} → ${o.status}`); if (page === 'live') refreshLive(); if (page === 'orders') loadOrders(); },
+    'ops:alert': a => { push(`⚠ ${a.type === 'no_rider' ? 'No rider available for ' + a.code : 'Rider did not acknowledge ' + a.code}`, true); toast(a.type === 'no_rider' ? 'No rider available for ' + a.code : 'Rider did not acknowledge ' + a.code, true); },
+    'rider:location': r => { riders[r.id] = { ...(riders[r.id] || {}), ...r }; drawRiders(); },
+    'rider:update': r => { riders[r.id] = { ...(riders[r.id] || {}), ...r }; drawRiders(); },
+  });
+  zonesCache = await api('/admin/zones');
+  render();
+}
+function push(msg, warn) { feed.unshift({ msg, warn, at: new Date() }); feed = feed.slice(0, 60); const f = document.getElementById('feed'); if (f) f.innerHTML = feedHtml(); }
+const feedHtml = () => feed.map(f => `<div class="it" style="${f.warn ? 'color:var(--maroon);font-weight:700' : ''}">${f.at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · ${f.msg}</div>`).join('') || '<p class="muted">Events will appear here.</p>';
+
+function render() {
+  root.innerHTML = `<div class="shell"><aside><div class="brand">Delivery Ops</div><div class="muted" style="margin-bottom:16px">${S.user.name || ''} · ${ROLE()}</div><nav>${PAGES.map(([k, l]) => `<button class="${page === k ? 'on' : ''}" onclick="go('${k}')">${l}</button>`).join('')}</nav><button class="btn ghost sm block" style="margin-top:20px" onclick="logout()">Sign out</button></aside><main id="main"></main></div>`;
+  ({ live: renderLive, orders: renderOrders, fleet: renderFleet, stores: renderStores, zones: renderZones, promos: renderPromos, finance: renderFinance, users: renderUsers })[page]();
+}
+function go(p) { page = p; render(); }
+const main = () => document.getElementById('main');
+
+// ---------- Live ----------
+async function renderLive() {
+  main().innerHTML = `<div class="row between"><h1 class="h1">Live operations</h1><span class="muted" id="clock"></span></div><div class="kpis" id="kpis"></div>
+    <div class="live"><div id="map"></div><div class="card"><h2 class="h2">Event feed</h2><div class="feed" id="feed">${feedHtml()}</div></div></div>
+    <h2 class="h2" style="margin-top:20px">Needs attention</h2><div id="alerts"></div>`;
+  map = L.map('map').setView([25.2854, 51.531], 12); L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+  zonesCache.forEach(z => L.polygon(z.polygon, { color: '#8A1538', weight: 1, fillOpacity: .04 }).addTo(map).bindTooltip(z.name));
+  riderLayer = L.layerGroup().addTo(map); orderLayer = L.layerGroup().addTo(map);
+  refreshLive(); if (!window._liveTimer) window._liveTimer = setInterval(() => { if (page === 'live') refreshLive(); }, 30000);
+}
+async function refreshLive() {
+  const [d, live, orders, alerts] = await Promise.all([api('/admin/dashboard'), api('/admin/live'), api('/orders'), api('/admin/alerts')]);
+  const k = document.getElementById('kpis'); if (!k) return;
+  k.innerHTML = [['Orders today', d.today.orders], ['Delivered', d.today.delivered], ['GMV today', fmt(d.today.gmv)], ['Awaiting merchant', d.live.awaiting_merchant], ['Preparing', d.live.preparing], ['En route', d.live.en_route], ['Unassigned', d.live.unassigned, d.live.unassigned > 0], ['Riders available', d.riders.available], ['Riders on task', d.riders.on_task]]
+    .map(([l, v, a]) => `<div class="card ${a ? 'alert' : ''}"><span class="muted">${l}</span><b>${v}</b></div>`).join('');
+  live.riders.forEach(r => riders[r.id] = r); drawRiders();
+  orderLayer.clearLayers();
+  orders.forEach(o => { const p = o.dropoff; L.circleMarker([p.lat, p.lng], { radius: 6, color: o.rider_id ? '#1E7A46' : '#B45309', fillOpacity: .8 }).addTo(orderLayer).bindTooltip(`${o.code} · ${o.status}${o.rider_name ? ' · ' + o.rider_name : ''}`).on('click', () => openOrder(o.id)); });
+  document.getElementById('alerts').innerHTML = alerts.length ? `<table class="t">${alerts.map(a => `<tr class="alert-row"><td><a href="#" onclick="openOrder(${a.id});return false">${a.code}</a></td><td>${a.store_name || 'Parcel'}</td><td><span class="pill">${statusLabel(a.status)}</span></td><td>${Math.round(a.minutes_in_state)} min in state</td><td>${a.assigned_at && !a.acknowledged_at ? 'Rider not acknowledged' : ''}</td></tr>`).join('')}</table>` : '<p class="muted">Nothing overdue.</p>';
+  const c = document.getElementById('clock'); if (c) c.textContent = 'Updated ' + new Date().toLocaleTimeString();
+}
+function drawRiders() {
+  if (!riderLayer) return; riderLayer.clearLayers();
+  Object.values(riders).filter(r => r.lat && r.status !== 'offline').forEach(r => {
+    const col = { available: '#1E7A46', on_task: '#8A1538', break: '#B45309' }[r.status] || '#A6A6AE';
+    L.marker([r.lat, r.lng], { icon: L.divIcon({ className: '', html: `<div style="background:${col};color:#fff;border-radius:999px;padding:2px 8px;font:700 11px Manrope;white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,.3)">🛵 ${r.name || r.id}</div>`, iconAnchor: [20, 10] }) }).addTo(riderLayer).bindTooltip(`${r.name || ''} · ${r.status}${r.current_order ? ' · ' + r.current_order : ''}`);
+  });
+}
+
+// ---------- Orders ----------
+function renderOrders() {
+  main().innerHTML = `<h1 class="h1">Orders</h1><div class="toolbar"><select id="fs"><option value="">Active</option>${Object.keys(STATUS).map(s => `<option value="${s}">${STATUS[s]}</option>`).join('')}<option value="all">All</option></select><input id="fq" placeholder="Search code, store, customer"></div><div id="tbl"><div class="spin"></div></div>`;
+  document.getElementById('fs').onchange = loadOrders; document.getElementById('fq').oninput = loadOrders; loadOrders();
+}
+async function loadOrders() {
+  const fs = document.getElementById('fs'); if (!fs) return;
+  const v = fs.value; const q = (document.getElementById('fq').value || '').toLowerCase();
+  let os = await api('/orders' + (v === 'all' ? '?all=1' : v ? '?status=' + v : ''));
+  if (q) os = os.filter(o => [o.code, o.store_name, o.customer_name, o.rider_name].join(' ').toLowerCase().includes(q));
+  document.getElementById('tbl').innerHTML = `<table class="t"><tr><th>Order</th><th>Type</th><th>Store</th><th>Customer</th><th>Rider</th><th>Status</th><th>Total</th><th>Pay</th><th>Age</th></tr>${os.map(o => `<tr style="cursor:pointer" onclick="openOrder(${o.id})"><td><b>${o.code}</b></td><td>${o.vertical}</td><td>${o.store_name || '—'}</td><td>${o.customer_name || ''}</td><td>${o.rider_name || (['accepted', 'preparing', 'ready'].includes(o.status) ? '<span class="pill warn">unassigned</span>' : '—')}</td><td><span class="pill ${pillClass(o.status)}">${statusLabel(o.status)}</span></td><td>${fmt(o.total)}</td><td>${o.payment_method}</td><td>${ago(o.created_at)}</td></tr>`).join('') || '<tr><td colspan="9" class="empty">No orders</td></tr>'}</table>`;
+}
+async function openOrder(id) {
+  const o = await api('/orders/' + id);
+  const rl = await api('/admin/riders');
+  document.querySelectorAll('.drawer').forEach(d => d.remove());
+  const d = document.createElement('div'); d.className = 'drawer';
+  const canCancel = !['delivered', 'cancelled', 'refunded'].includes(o.status);
+  d.innerHTML = `<div class="row between"><h2 class="h2">${o.code}</h2><button class="btn sm ghost" onclick="this.closest('.drawer').remove()">Close</button></div>
+    <span class="pill ${pillClass(o.status)}">${statusLabel(o.status)}</span> <span class="muted">${o.vertical} · ${o.payment_method} · ${o.payment_status}</span>
+    <div class="card" style="margin:12px 0"><b>${o.store_name || 'Parcel pickup'}</b><div class="muted">${o.store_address || (o.pickup && o.pickup.line) || ''}</div><hr style="border:0;border-top:1px solid var(--line)"><b>${o.customer_name} · ${o.customer_phone}</b><div class="muted">${o.dropoff.line || ''} ${o.dropoff.notes || ''}</div></div>
+    <div class="card">${o.items.map(i => `<div class="row between"><span>${i.qty} × ${i.name}</span><span>${fmt(i.line_total)}</span></div>`).join('')}<div class="row between muted"><span>Delivery / service / discount</span><span>${o.delivery_fee} / ${o.service_fee} / −${o.discount}</span></div><div class="row between"><b>Total</b><b>${fmt(o.total)}</b></div>${o.notes ? `<div class="muted">📝 ${o.notes}</div>` : ''}</div>
+    <h3 style="margin:14px 0 4px;font-size:14px">Rider</h3><div class="row"><select id="rsel" style="flex:1;padding:8px;border:1px solid var(--line);border-radius:8px"><option value="">Auto-assign best rider</option>${rl.filter(r => r.status !== 'offline').map(r => `<option value="${r.id}" ${r.id === o.rider_id ? 'selected' : ''}>${r.name} · ${r.status}</option>`).join('')}</select><button class="btn sm" id="asg" ${['accepted', 'preparing', 'ready', 'picked_up'].includes(o.status) ? '' : 'disabled'}>Assign</button></div>
+    ${o.rider_name ? `<p class="muted">Current: ${o.rider_name} · ${o.rider_phone}${o.acknowledged_at ? ' · acknowledged' : ' · <b>not acknowledged</b>'}</p>` : ''}
+    <div class="row" style="margin-top:12px;flex-wrap:wrap">${canCancel ? `<button class="btn sm ghost" id="cxl">Cancel order</button>` : ''}${o.status === 'delivered' && ['finance', 'admin'].includes(ROLE()) ? `<button class="btn sm ghost" id="rfd">Refund</button>` : ''}${o.status === 'placed' && ROLE() === 'admin' ? `<button class="btn sm ghost" id="fa">Force accept</button>` : ''}</div>
+    <h3 style="margin:14px 0 4px;font-size:14px">Timeline</h3><ul class="tl">${o.events.map(e => `<li>${new Date(e.created_at).toLocaleTimeString()} · <b>${e.status}</b> · ${e.actor_role || ''} ${e.note ? '· ' + e.note : ''}</li>`).join('')}</ul>`;
+  document.body.appendChild(d);
+  d.querySelector('#asg').onclick = async () => { try { await api(`/orders/${id}/assign`, { method: 'POST', body: { rider_id: d.querySelector('#rsel').value || null } }); toast('Assignment updated'); openOrder(id); } catch (e) { toast(e.message, true); } };
+  const cx = d.querySelector('#cxl'); if (cx) cx.onclick = async () => { const n = prompt('Cancellation reason'); if (n === null) return; try { await api(`/orders/${id}/status`, { method: 'POST', body: { status: 'cancelled', note: n } }); toast('Order cancelled'); openOrder(id); } catch (e) { toast(e.message, true); } };
+  const rf = d.querySelector('#rfd'); if (rf) rf.onclick = async () => { const a = prompt('Refund amount (QAR)', o.total); if (!a) return; const n = prompt('Reason'); try { await api(`/orders/${id}/refund`, { method: 'POST', body: { amount: Number(a), note: n } }); toast('Refunded to customer wallet'); openOrder(id); } catch (e) { toast(e.message, true); } };
+  const fa = d.querySelector('#fa'); if (fa) fa.onclick = async () => { try { await api(`/orders/${id}/status`, { method: 'POST', body: { status: 'accepted' } }); openOrder(id); } catch (e) { toast(e.message, true); } };
+}
+
+// ---------- Fleet ----------
+async function renderFleet() {
+  const rs = await api('/admin/riders');
+  main().innerHTML = `<div class="row between"><h1 class="h1">Fleet</h1><button class="btn sm" onclick="addRider()">+ Add rider</button></div><p class="muted">Employed riders. Cash in hand is settled at the office; riders above their limit stop receiving cash orders.</p>
+    <table class="t"><tr><th>Rider</th><th>Phone</th><th>Zone</th><th>Vehicle</th><th>Status</th><th>On shift since</th><th>Deliveries</th><th>Cash in hand</th><th></th></tr>${rs.map(r => `<tr><td><b>${r.name || ''}</b></td><td>${r.phone}</td><td>${r.zone_name || '—'}</td><td>${r.vehicle}</td><td><span class="pill ${r.status === 'available' ? 'ok' : r.status === 'on_task' ? 'maroon' : ''}">${r.status}</span></td><td>${r.shift_started ? new Date(r.shift_started).toLocaleTimeString() : '—'}</td><td>${r.deliveries}</td><td style="${Number(r.cash_in_hand) >= Number(r.cash_limit) * .8 ? 'color:var(--maroon);font-weight:700' : ''}">${fmt(r.cash_in_hand)} / ${Number(r.cash_limit)}</td><td class="row"><button class="btn sm ghost" onclick="settle(${r.id},${r.cash_in_hand})">Settle cash</button><button class="btn sm ghost" onclick="editRider(${r.id},'${(r.name || '').replace(/'/g, '')}',${r.zone_id || 'null'},${r.cash_limit},${r.active})">Edit</button></td></tr>`).join('')}</table>`;
+}
+async function settle(id, cash) { const a = prompt('Amount received from rider (QAR)', Number(cash).toFixed(2)); if (!a) return; try { await api(`/admin/riders/${id}/settle`, { method: 'POST', body: { amount: Number(a) } }); toast('Cash settled'); renderFleet(); } catch (e) { toast(e.message, true); } }
+async function addRider() { const name = prompt('Rider name'); if (!name) return; const phone = prompt('Mobile number (+974...)'); if (!phone) return; const zone_id = zonesCache.length === 1 ? zonesCache[0].id : Number(prompt('Zone id: ' + zonesCache.map(z => z.id + '=' + z.name).join(', '))); try { await api('/admin/riders', { method: 'POST', body: { name, phone, zone_id } }); toast('Rider added — they can sign in to the rider app'); renderFleet(); } catch (e) { toast(e.message, true); } }
+async function editRider(id, name, zone_id, cash_limit, active) { const n = prompt('Name', name); if (n === null) return; const cl = prompt('Cash limit', cash_limit); const act = confirm('Keep this rider active? (Cancel = deactivate)'); try { await api(`/admin/riders/${id}`, { method: 'PATCH', body: { name: n, cash_limit: Number(cl), active: act } }); renderFleet(); } catch (e) { toast(e.message, true); } }
+
+// ---------- Stores ----------
+async function renderStores() {
+  const ss = await api('/admin/stores');
+  main().innerHTML = `<div class="row between"><h1 class="h1">Stores</h1>${ROLE() === 'admin' ? '<button class="btn sm" onclick="storeForm()">+ Onboard store</button>' : ''}</div>
+    <table class="t"><tr><th>Store</th><th>Vertical</th><th>Zone</th><th>Status</th><th>Products</th><th>Commission</th><th>Rating</th><th></th></tr>${ss.map(s => `<tr><td><b>${s.name_en}</b><div class="muted">${s.name_ar || ''} · ${s.address || ''}</div></td><td>${s.vertical}</td><td>${s.zone_name || '—'}</td><td><span class="pill ${s.status === 'open' ? 'ok' : 'warn'}">${s.status}</span>${s.featured ? ' <span class="pill maroon">featured</span>' : ''}${s.active ? '' : ' <span class="pill">inactive</span>'}</td><td>${s.products}</td><td>${s.commission_pct}%</td><td>${Number(s.rating).toFixed(1)} (${s.rating_count})</td><td>${ROLE() === 'admin' ? `<button class="btn sm ghost" onclick='storeForm(${JSON.stringify(s)})'>Edit</button>` : ''}</td></tr>`).join('')}</table>`;
+}
+function storeForm(s = {}) {
+  const m = document.createElement('div'); m.className = 'modal-bg'; m.innerHTML = `<div class="modal"><h2 class="h2">${s.id ? 'Edit store' : 'Onboard store'}</h2>
+    <div class="row"><div class="field" style="flex:1"><label>Name (EN)</label><input id="en" value="${s.name_en || ''}"></div><div class="field" style="flex:1"><label>Name (AR)</label><input id="ar" value="${s.name_ar || ''}"></div></div>
+    <div class="row"><div class="field" style="flex:1"><label>Vertical</label><select id="vt">${['food', 'grocery', 'pharmacy'].map(v => `<option ${s.vertical === v ? 'selected' : ''}>${v}</option>`).join('')}</select></div><div class="field" style="flex:1"><label>Zone</label><select id="zn"><option value="">Auto from location</option>${zonesCache.map(z => `<option value="${z.id}" ${s.zone_id === z.id ? 'selected' : ''}>${z.name}</option>`).join('')}</select></div></div>
+    <div class="field"><label>Address</label><input id="ad" value="${s.address || ''}"></div>
+    <div class="row"><div class="field" style="flex:1"><label>Latitude</label><input id="la" type="number" step="any" value="${s.lat || 25.28}"></div><div class="field" style="flex:1"><label>Longitude</label><input id="ln" type="number" step="any" value="${s.lng || 51.53}"></div></div>
+    <div class="row"><div class="field" style="flex:1"><label>Commission %</label><input id="cm" type="number" value="${s.commission_pct ?? 15}"></div><div class="field" style="flex:1"><label>Prep time (min)</label><input id="pt" type="number" value="${s.prep_time_min ?? 20}"></div></div>
+    ${s.id ? `<div class="row"><label class="row"><input type="checkbox" id="ft" ${s.featured ? 'checked' : ''}> Featured</label><label class="row"><input type="checkbox" id="ac" ${s.active ? 'checked' : ''}> Active</label></div>` : `<div class="row"><div class="field" style="flex:1"><label>Owner name</label><input id="on"></div><div class="field" style="flex:1"><label>Owner mobile (merchant app login)</label><input id="op"></div></div>`}
+    <div class="row" style="margin-top:8px"><button class="btn" id="sv">Save</button><button class="btn ghost" onclick="this.closest('.modal-bg').remove()">Cancel</button></div></div>`;
+  document.body.appendChild(m);
+  m.querySelector('#sv').onclick = async () => {
+    const g = id => m.querySelector('#' + id);
+    const body = { name_en: g('en').value, name_ar: g('ar').value, vertical: g('vt').value, zone_id: g('zn').value ? Number(g('zn').value) : undefined, address: g('ad').value, lat: Number(g('la').value), lng: Number(g('ln').value), commission_pct: Number(g('cm').value), prep_time_min: Number(g('pt').value) };
+    if (s.id) { body.featured = g('ft').checked; body.active = g('ac').checked; } else { body.owner_name = g('on').value; body.owner_phone = g('op').value; }
+    try { await api(s.id ? `/admin/stores/${s.id}` : '/admin/stores', { method: s.id ? 'PATCH' : 'POST', body }); m.remove(); toast('Saved'); renderStores(); } catch (e) { toast(e.message, true); }
+  };
+}
+
+// ---------- Zones ----------
+let zmap, zpoly = [], zlayer;
+async function renderZones() {
+  zonesCache = await api('/admin/zones');
+  main().innerHTML = `<h1 class="h1">Delivery zones</h1><p class="muted">Click on the map to draw a polygon for a new zone, then set its fees. Fees: base fee covers the first 2 km, then per-km.</p>
+    <div class="live"><div id="map"></div><div class="card"><h2 class="h2">New zone</h2><div class="field"><label>Name</label><input id="zname"></div><div class="row"><div class="field" style="flex:1"><label>Base fee</label><input id="zb" type="number" value="8"></div><div class="field" style="flex:1"><label>Per km</label><input id="zk" type="number" value="2"></div></div><div class="row"><div class="field" style="flex:1"><label>Min order</label><input id="zm" type="number" value="20"></div><div class="field" style="flex:1"><label>Service fee %</label><input id="zs" type="number" value="5"></div></div><p class="muted" id="zpts">0 points</p><div class="row"><button class="btn sm" onclick="saveZone()" ${ROLE() === 'admin' ? '' : 'disabled'}>Save zone</button><button class="btn sm ghost" onclick="zpoly=[];zlayer.clearLayers();document.getElementById('zpts').textContent='0 points'">Clear</button></div></div></div>
+    <table class="t" style="margin-top:14px"><tr><th>Zone</th><th>Base</th><th>Per km</th><th>Min order</th><th>Service %</th><th>Active</th><th></th></tr>${zonesCache.map(z => `<tr><td><b>${z.name}</b></td><td>${z.base_fee}</td><td>${z.per_km}</td><td>${z.min_order}</td><td>${z.service_fee_pct}</td><td>${z.active ? 'yes' : 'no'}</td><td>${ROLE() === 'admin' ? `<button class="btn sm ghost" onclick="editZone(${z.id})">Edit fees</button>` : ''}</td></tr>`).join('')}</table>`;
+  zmap = L.map('map').setView([25.2854, 51.531], 11); L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(zmap);
+  zonesCache.forEach(z => L.polygon(z.polygon, { color: '#8A1538', weight: 1.5, fillOpacity: .06 }).addTo(zmap).bindTooltip(z.name));
+  zlayer = L.layerGroup().addTo(zmap); zpoly = [];
+  zmap.on('click', e => { zpoly.push([e.latlng.lat, e.latlng.lng]); zlayer.clearLayers(); L.polygon(zpoly, { color: '#1E7A46' }).addTo(zlayer); document.getElementById('zpts').textContent = zpoly.length + ' points'; });
+}
+async function saveZone() { if (zpoly.length < 3) return toast('Draw at least 3 points', true); try { await api('/admin/zones', { method: 'POST', body: { name: zname.value, polygon: zpoly, base_fee: Number(zb.value), per_km: Number(zk.value), min_order: Number(zm.value), service_fee_pct: Number(zs.value) } }); toast('Zone saved'); renderZones(); } catch (e) { toast(e.message, true); } }
+async function editZone(id) { const z = zonesCache.find(x => x.id === id); const b = prompt('Base fee', z.base_fee), k = prompt('Per km', z.per_km), m = prompt('Min order', z.min_order), s = prompt('Service fee %', z.service_fee_pct); try { await api(`/admin/zones/${id}`, { method: 'PATCH', body: { base_fee: Number(b), per_km: Number(k), min_order: Number(m), service_fee_pct: Number(s) } }); renderZones(); } catch (e) { toast(e.message, true); } }
+
+// ---------- Promos ----------
+async function renderPromos() {
+  const ps = await api('/admin/promos');
+  main().innerHTML = `<div class="row between"><h1 class="h1">Promotions</h1>${ROLE() === 'admin' ? '<button class="btn sm" onclick="promoForm()">+ New code</button>' : ''}</div>
+    <table class="t"><tr><th>Code</th><th>Type</th><th>Value</th><th>Min order</th><th>Vertical</th><th>Uses</th><th>First order only</th><th>Expires</th><th>Active</th></tr>${ps.map(p => `<tr><td><b>${p.code}</b></td><td>${p.type}</td><td>${p.value}</td><td>${p.min_order}</td><td>${p.vertical || 'all'}</td><td>${p.used}${p.max_uses ? ' / ' + p.max_uses : ''}</td><td>${p.first_order_only ? 'yes' : 'no'}</td><td>${p.expires_at ? new Date(p.expires_at).toLocaleDateString() : '—'}</td><td>${ROLE() === 'admin' ? `<button class="btn sm ghost" onclick="api('/admin/promos/${p.id}',{method:'PATCH',body:{active:${!p.active}}}).then(renderPromos)">${p.active ? 'Disable' : 'Enable'}</button>` : p.active ? 'yes' : 'no'}</td></tr>`).join('')}</table>`;
+}
+function promoForm() {
+  const m = document.createElement('div'); m.className = 'modal-bg'; m.innerHTML = `<div class="modal"><h2 class="h2">New promo code</h2><div class="field"><label>Code</label><input id="c"></div><div class="row"><div class="field" style="flex:1"><label>Type</label><select id="ty"><option value="percent">Percent off</option><option value="fixed">Fixed amount off</option><option value="free_delivery">Free delivery</option></select></div><div class="field" style="flex:1"><label>Value</label><input id="v" type="number" value="10"></div></div><div class="row"><div class="field" style="flex:1"><label>Min order</label><input id="mo" type="number" value="0"></div><div class="field" style="flex:1"><label>Max uses</label><input id="mu" type="number"></div></div><div class="row"><div class="field" style="flex:1"><label>Vertical</label><select id="vt"><option value="">All</option><option>food</option><option>grocery</option><option>pharmacy</option></select></div><div class="field" style="flex:1"><label>Expires</label><input id="ex" type="date"></div></div><label class="row"><input type="checkbox" id="fo"> First order only</label><div class="row" style="margin-top:12px"><button class="btn" id="sv">Create</button><button class="btn ghost" onclick="this.closest('.modal-bg').remove()">Cancel</button></div></div>`;
+  document.body.appendChild(m);
+  m.querySelector('#sv').onclick = async () => { const g = id => m.querySelector('#' + id); try { await api('/admin/promos', { method: 'POST', body: { code: g('c').value, type: g('ty').value, value: Number(g('v').value), min_order: Number(g('mo').value), max_uses: g('mu').value ? Number(g('mu').value) : null, vertical: g('vt').value || null, expires_at: g('ex').value || null, first_order_only: g('fo').checked } }); m.remove(); renderPromos(); } catch (e) { toast(e.message, true); } };
+}
+
+// ---------- Finance ----------
+async function renderFinance() {
+  if (!['finance', 'admin'].includes(ROLE())) return main().innerHTML = '<p class="empty">Finance role required.</p>';
+  const from = new Date(); from.setDate(1);
+  const [sum, payouts, led] = await Promise.all([api(`/admin/ledger/summary?from=${from.toISOString()}`), api(`/admin/payouts?from=${from.toISOString()}`), api('/admin/ledger')]);
+  const get = a => sum.find(x => x.account === a) || { debit: 0, credit: 0 };
+  main().innerHTML = `<h1 class="h1">Finance</h1><p class="muted">Month to date. Every figure below comes from the same ledger, so payouts, rider cash and revenue always reconcile.</p>
+    <div class="kpis"><div class="card"><span class="muted">Commission revenue</span><b>${fmt(get('commission_revenue').credit)}</b></div><div class="card"><span class="muted">Delivery revenue</span><b>${fmt(get('delivery_revenue').credit)}</b></div><div class="card"><span class="muted">Service revenue</span><b>${fmt(get('service_revenue').credit)}</b></div><div class="card"><span class="muted">Discounts given</span><b>${fmt(get('discounts').debit)}</b></div><div class="card"><span class="muted">Refunds</span><b>${fmt(get('refunds').debit)}</b></div><div class="card"><span class="muted">Cash with riders (net)</span><b>${fmt(get('cash_riders').debit - get('cash_riders').credit)}</b></div><div class="card"><span class="muted">Owed to merchants</span><b>${fmt(get('merchant_payable').credit)}</b></div></div>
+    <h2 class="h2">Merchant payouts</h2><table class="t"><tr><th>Store</th><th>Orders</th><th>Commission</th><th>Payable</th></tr>${payouts.map(p => `<tr><td>${p.name_en}</td><td>${p.orders}</td><td>${fmt(p.commission)}</td><td><b>${fmt(p.payable)}</b></td></tr>`).join('')}</table>
+    <h2 class="h2" style="margin-top:18px">Ledger (latest)</h2><div class="toolbar"><button class="btn sm ghost" onclick="exportCsv()">Export CSV</button></div><table class="t"><tr><th>When</th><th>Order</th><th>Account</th><th>Debit</th><th>Credit</th><th>Memo</th></tr>${led.slice(0, 100).map(l => `<tr><td>${new Date(l.created_at).toLocaleString()}</td><td>${l.code || ''}</td><td>${l.account}</td><td>${Number(l.debit) ? Number(l.debit).toFixed(2) : ''}</td><td>${Number(l.credit) ? Number(l.credit).toFixed(2) : ''}</td><td class="muted">${l.memo || ''}</td></tr>`).join('')}</table>`;
+  window._led = led;
+}
+function exportCsv() { const rows = [['created_at', 'order', 'account', 'party_id', 'debit', 'credit', 'memo'], ...window._led.map(l => [l.created_at, l.code || '', l.account, l.party_id || '', l.debit, l.credit, (l.memo || '').replace(/,/g, ' ')])]; const a = document.createElement('a'); a.href = 'data:text/csv,' + encodeURIComponent(rows.map(r => r.join(',')).join('\n')); a.download = 'ledger.csv'; a.click(); }
+
+// ---------- Users ----------
+async function renderUsers() {
+  if (ROLE() !== 'admin') return main().innerHTML = '<p class="empty">Admin role required.</p>';
+  const us = await api('/admin/users');
+  main().innerHTML = `<h1 class="h1">Users</h1><p class="muted">Change a user's role to give them access to the console, the merchant app, or the rider app.</p><table class="t"><tr><th>Name</th><th>Phone</th><th>Role</th><th>Store</th><th>Active</th></tr>${us.map(u => `<tr><td>${u.name || ''}</td><td>${u.phone}</td><td><select onchange="api('/admin/users/${u.id}',{method:'PATCH',body:{role:this.value}}).then(()=>toast('Role updated'))">${['customer', 'merchant', 'rider', 'dispatcher', 'fleet', 'finance', 'admin'].map(r => `<option ${u.role === r ? 'selected' : ''}>${r}</option>`).join('')}</select></td><td>${u.store_id || ''}</td><td><input type="checkbox" ${u.active ? 'checked' : ''} onchange="api('/admin/users/${u.id}',{method:'PATCH',body:{active:this.checked}})"></td></tr>`).join('')}</table>`;
+}
+boot();
+</script>
+</body></html>
