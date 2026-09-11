@@ -24,8 +24,8 @@ app.use('/api/admin', require('./routes/admin'));
 
 // Front-end apps served from the same process (one Railway service)
 const apps = path.join(__dirname, '..', '..', 'apps');
-for (const a of ['customer', 'merchant', 'rider', 'console', 'shared']) app.use('/' + a, express.static(path.join(apps, a)));
-app.get('/', (req, res) => res.redirect('/customer/'));
+for (const a of ['customer', 'merchant', 'rider', 'console', 'shared', 'demo']) app.use('/' + a, express.static(path.join(apps, a)));
+app.get('/', (req, res) => res.sendFile(path.join(apps, 'demo', 'index.html')));
 
 app.use((err, req, res, next) => {
   const status = err.status || 500;
